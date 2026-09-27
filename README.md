@@ -8,7 +8,7 @@
    - KSU-Next v3.x 主线只支持 kprobes 挂钩（`depends on KPROBES`），且内核代码已无任何 SUSFS 集成；
    - legacy 线保留 `KSU_MANUAL_HOOK`（KPROBES 关闭时自动启用），与 susfs4ksu 官方"非 GKI 手动挂钩"路线一致；
    - 内核源码不含 hook 调用点，由本仓库 `patches/ksun-legacy-manual-hooks.patch` 写入（fs/exec.c 的 do_execveat_common 单点覆盖 execve 全家、fs/open.c faccessat、fs/stat.c newfstatat/fstatat64、kernel/reboot.c sys_reboot——最后一处是 v3.x Kbuild 的集成校验点）。旧 non-kprobes.patch 不可用：其调用的 `ksu_handle_vfs_read` 在 v3.x 已不存在，会导致链接失败。
-2. **SUSFS 集成**：susfs4ksu `kernel-4.19` 分支 fs 侧补丁 + 本仓库 `patches/ksu-susfs-kconfig.fragment`（从作者补丁中提取的 `config KSU_SUSFS*` 菜单，追加到 KSU-Next 的 kernel/Kconfig——susfs4ksu 官方要求这些声明位于 $KernelSU_repo/kernel/Kconfig）。
+2. **SUSFS 集成**：susfs4ksu `kernel-4.19` 分支 fs 侧补丁 + 本仓库 `patches/ksu-susfs-kconfig.fragment`（Kconfig 声明）+ `patches/susfs_ksu_compat.c`（胶水：该分支 fs 侧补丁引用的 3 个域检查/try_umount 函数在其 susfs.c 中缺失，此文件委托给 KSU-Next legacy 自带的 selinux 基础设施，编入 kernelsu 对象）。
 3. **defconfig 显式启用 KSU/SUSFS**：n0kernel 的 cmi/umi defconfig 不含任何 `CONFIG_KSU*`（首跑因此静默编出无 KSU 空壳）。现于 defconfig 后用 `scripts/config` 启用全部选项 + `olddefconfig`，并 fail-fast 断言 `CONFIG_KSU=y / KSU_MANUAL_HOOK=y / KSU_SUSFS=y / SUS_MOUNT / TRY_UMOUNT / HAS_MAGIC_MOUNT`。
 4. runner `ubuntu-22.04` → `ubuntu-24.04`；artifact 保留 7 天；型号选错显式失败。
 

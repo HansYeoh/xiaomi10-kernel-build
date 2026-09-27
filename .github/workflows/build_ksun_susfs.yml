@@ -57,6 +57,11 @@ jobs:
           # KSU_SUSFS 系列选项的 Kconfig 声明（susfs4ksu 官方要求声明在 $KernelSU_repo/kernel/Kconfig）
           cat $GITHUB_WORKSPACE/patches/ksu-susfs-kconfig.fragment >> KernelSU-Next/kernel/Kconfig
           echo "SUSFS Kconfig 片段已追加"
+          # susfs4ksu kernel-4.19 分支的 fs 侧补丁引用 3 个域检查函数但其 susfs.c 未定义，
+          # 由胶水文件委托给 KSU-Next 自带的 selinux 基础设施
+          cp $GITHUB_WORKSPACE/patches/susfs_ksu_compat.c KernelSU-Next/kernel/
+          echo 'kernelsu-objs += susfs_ksu_compat.o' >> KernelSU-Next/kernel/Kbuild
+          echo "susfs_ksu_compat.o 已加入 Kbuild"
 
       - name: 4.写入手动 hook 调用点（适配 KSU-Next v3.x legacy）
         run: |
