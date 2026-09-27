@@ -1,0 +1,120 @@
+name: Build KSUN SUSFS Kernel
+run-name: Build Kernel KSUN SUSFS (${{ inputs.phone }})
+on:
+  workflow_dispatch:
+    inputs:
+      phone:
+        description: '选择手机型号：'
+        required: true
+        default: '小米10Pro'
+        type: choice
+        options:
+          - 小米10
+          - 小米10Pro
+      version:
+        description: '自定义版本名（如perf-xxx）可为空（则为n0kernel）'
+        required: false
+        type: string
+      ksu_tag:
+        description: 'KernelSU-Next 版本（留空=自动最新 release，如 v3.4.0）'
+        required: false
+        type: string
+jobs:
+  build_job:
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CI: "false"
+    steps:
+
+      - name: 1.拉取编译链
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/19.0.0git-20240125-release/Clang-19.0.0git-20240125.tar.gz
+          mkdir -p clang
+          tar -xzf Clang-19.0.0git-20240125.tar.gz -C clang
+
+      - name: 2.拉取源码与补丁
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          git clone https://github.com/clcwpwqi/kernel_xiaomi_sm8250_n0kernel --depth=1 android_kernel
+          git clone https://github.com/clcwpwqi/xiaomi10-kernelsu-susfs-kernel-build src
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 --depth=1 susfs
+
+      - name: 3.添加KernelSU Next（ksu_tag留空=每次构建自动用最新 release tag）
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          curl -fLSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh "${{ inputs.ksu_tag }}"
+
+      - name: 4.修补KernelSU Next
+        run: |
+          ls
+          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
+          echo "已经过预修复"
+
+      - name: 5.修补susfs
+        run: |
+            echo "选择susfs修补"
+            cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+            echo "复制susfs/kernel_patches/fs/"
+            cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/fs/* ./fs/
+            echo "复制susfs/kernel_patches/include/linux/"
+            cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/include/linux/* ./include/linux/
+            echo "复制susfs内核补丁"
+            cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/50_add_susfs_in_kernel-4.19.patch .
+            echo "执行susfs补丁"
+            patch -p1 < 50_add_susfs_in_kernel-4.19.patch || true
+            echo "修复susfs补丁"
+            patch -p1 < after_patch_fix.patch
+
+      - name: 6.开始构建
+        run: |
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
+          echo "Updated PATH: $PATH"
+          clang --version
+
+          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          # 自定义版本
+          if [ ! -z "${{ inputs.version }}" ]; then
+            echo "不为空"
+            sed -i '$s|echo "\$res"|echo "-${{ inputs.version }}"|' ./scripts/setlocalversion
+          else
+            echo "输入为空"
+          fi
+
+          if [ "${{ inputs.phone }}" = '小米10' ]; then
+            echo "选择小米10配置"
+            DEFCONFIG=vendor/umi_defconfig
+          elif [ "${{ inputs.phone }}" = '小米10Pro' ]; then
+            echo "选择小米10Pro配置"
+            DEFCONFIG=vendor/cmi_defconfig
+          else
+            echo "输入错误"
+            exit 1
+          fi
+
+          echo "当前配置为 $DEFCONFIG"
+
+          make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
+          make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+      - name: 7.复制boot文件
+        run: |
+            cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/arch/arm64/boot
+            ls
+            strings Image | grep "Linux version"
+            mkdir $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/
+            mkdir $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
+            cp Image $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
+
+      - name: 8.上传刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: SM8250-KernelSU-Next-SUSFS
+          path: kernel_workspace/src/Anykernel/*
+          retention-days: 7
