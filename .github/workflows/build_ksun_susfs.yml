@@ -16,8 +16,9 @@ on:
         required: false
         type: string
       ksu_tag:
-        description: 'KernelSU-Next 版本（留空=自动最新 release，如 v3.4.0）'
+        description: 'KernelSU-Next tag（须用 legacy 线=手动挂钩，适配 SUSFS；默认 v3.4.0-legacy）'
         required: false
+        default: 'v3.4.0-legacy'
         type: string
 jobs:
   build_job:
@@ -28,6 +29,9 @@ jobs:
       CCACHE_HARDLINK: "true"
       CI: "false"
     steps:
+
+      - name: 0.检出本仓库（SUSFS Kconfig 片段等）
+        uses: actions/checkout@v4
 
       - name: 1.拉取编译链
         run: |
@@ -44,22 +48,25 @@ jobs:
           git clone https://github.com/clcwpwqi/xiaomi10-kernelsu-susfs-kernel-build src
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 --depth=1 susfs
 
-      - name: 3.添加KernelSU Next（ksu_tag留空=每次构建自动用最新 release tag）
+      - name: 3.集成 KernelSU-Next（legacy 线）并追加 SUSFS Kconfig
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           curl -fLSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" -o /tmp/ksu-setup.sh
-          bash /tmp/ksu-setup.sh "${{ inputs.ksu_tag }}"
+          bash /tmp/ksu-setup.sh "${{ inputs.ksu_tag || 'v3.4.0-legacy' }}"
+          echo "KSU-Next 版本: $(git -C KernelSU-Next describe --tags --always)"
+          # KSU_SUSFS 系列选项的 Kconfig 声明（susfs4ksu 官方要求声明在 $KernelSU_repo/kernel/Kconfig）
+          cat $GITHUB_WORKSPACE/patches/ksu-susfs-kconfig.fragment >> KernelSU-Next/kernel/Kconfig
+          echo "SUSFS Kconfig 片段已追加"
 
-      - name: 4.修补KernelSU Next
+      - name: 4.写入手动 hook 调用点（non-kprobes）
         run: |
-          ls
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          patch -p1 < $GITHUB_WORKSPACE/kernel_workspace/src/patches/non-kprobes.patch
           cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
-          echo "已经过预修复"
+          echo "手动 hook 调用点已写入 fs/"
 
-      - name: 5.修补susfs
+      - name: 5.修补 susfs（fs 侧）
         run: |
-            echo "选择susfs修补"
             cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
             echo "复制susfs/kernel_patches/fs/"
             cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/fs/* ./fs/
@@ -72,7 +79,7 @@ jobs:
             echo "修复susfs补丁"
             patch -p1 < after_patch_fix.patch
 
-      - name: 6.开始构建
+      - name: 6.开始构建（含 KSU/SUSFS 配置启用与校验）
         run: |
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
           echo "Updated PATH: $PATH"
@@ -81,10 +88,10 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           # 自定义版本
           if [ ! -z "${{ inputs.version }}" ]; then
-            echo "不为空"
+            echo "自定义版本名: ${{ inputs.version }}"
             sed -i '$s|echo "\$res"|echo "-${{ inputs.version }}"|' ./scripts/setlocalversion
           else
-            echo "输入为空"
+            echo "输入为空，使用 n0kernel 默认版本名"
           fi
 
           if [ "${{ inputs.phone }}" = '小米10' ]; then
@@ -101,6 +108,25 @@ jobs:
           echo "当前配置为 $DEFCONFIG"
 
           make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
+
+          # defconfig 不含 KSU/SUSFS 选项，显式启用（SUS_SU 依赖 KPROBES，非 GKI 不启用）
+          ./scripts/config --file out/.config \
+            -e MODULES -e KSU -e KSU_MANUAL_HOOK -e KSU_SUSFS \
+            -e KSU_SUSFS_HAS_MAGIC_MOUNT -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT \
+            -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT
+          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
+
+          # fail-fast：KSU/SUSFS 必须真正生效，否则产出的是无 KSU 的空壳
+          for opt in CONFIG_KSU=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_KSU_SUSFS=y CONFIG_KSU_SUSFS_SUS_MOUNT=y CONFIG_KSU_SUSFS_TRY_UMOUNT=y CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y; do
+            grep -q "^$opt\$" out/.config || { echo "FATAL: $opt 未生效，请检查 Kconfig/依赖"; exit 1; }
+          done
+          echo "=== KSU/SUSFS 配置校验通过 ==="
+          grep -E "^CONFIG_KSU|^CONFIG_KSU_SUSFS" out/.config
+
           make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
       - name: 7.复制boot文件
