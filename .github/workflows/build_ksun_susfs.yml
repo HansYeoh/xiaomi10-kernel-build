@@ -58,12 +58,14 @@ jobs:
           cat $GITHUB_WORKSPACE/patches/ksu-susfs-kconfig.fragment >> KernelSU-Next/kernel/Kconfig
           echo "SUSFS Kconfig 片段已追加"
 
-      - name: 4.写入手动 hook 调用点（non-kprobes）
+      - name: 4.写入手动 hook 调用点（适配 KSU-Next v3.x legacy）
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-          patch -p1 < $GITHUB_WORKSPACE/kernel_workspace/src/patches/non-kprobes.patch
+          # v3.x Kbuild 校验 kernel/reboot.c 中的 ksu_handle_sys_reboot；本补丁按
+          # KSU-Next v3.4.0-legacy 的 hook 集合生成（execveat/faccessat/stat/sys_reboot）
+          patch -p1 < $GITHUB_WORKSPACE/patches/ksun-legacy-manual-hooks.patch
           cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
-          echo "手动 hook 调用点已写入 fs/"
+          echo "手动 hook 调用点已写入 fs/ 与 kernel/reboot.c"
 
       - name: 5.修补 susfs（fs 侧）
         run: |
